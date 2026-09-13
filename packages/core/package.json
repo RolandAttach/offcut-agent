@@ -1,0 +1,65 @@
+{
+  "name": "@offcut/core",
+  "version": "3.1.0",
+  "description": "OFFCUT AGENT memory core: Access Layer, Memory Store, Merge Engine, Context Builder. One core behind SDK, MCP and HTTP (invariant 8).",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/seed.js",
+    "!dist/seed.d.ts",
+    "prisma"
+  ],
+  "scripts": {
+    "build": "prisma generate && node scripts/emit-bootstrap-sql.mjs && tsc -p tsconfig.json",
+    "db:push": "prisma db push --skip-generate && prisma generate",
+    "db:studio": "prisma studio",
+    "seed": "tsx src/seed.ts",
+    "seed:reset": "tsx src/seed.ts --reset",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "backup": "tsx src/cli/backup.ts create",
+    "backup:list": "tsx src/cli/backup.ts list",
+    "backup:prune": "tsx src/cli/backup.ts prune",
+    "backup:restore": "tsx src/cli/backup.ts restore",
+    "postinstall": "prisma generate",
+    "bootstrap:sql": "node scripts/emit-bootstrap-sql.mjs"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.1.0",
+    "zod": "^3.23.8",
+    "prisma": "^6.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "memory",
+    "agents",
+    "mcp",
+    "subagents",
+    "sdk",
+    "offcut"
+  ],
+  "bin": {
+    "offcut-backup": "./dist/cli/backup.js"
+  },
+  "engines": {
+    "node": ">=20.11.0"
+  }
+}

@@ -1,0 +1,751 @@
+// OFFCUT AGENT - memory store schema (TZ v3.1)
+//
+// Design notes tied to the specification:
+//   SS3.2  A record carries recordId, workspaceId, agentId, type, text, topic,
+//          source, timestamp, version and access scope. Authorship (agentId,
+//          taken from the verified connection) and supporting evidence (source)
+//          are separate fields.
+//   SS3.3  Merging happens inside one workspace AND one identical audience.
+//          Private records never become shared because topics match.
+//   SS3.5  Deletion removes a record and its dependent derived blocks from
+//          every later response; indexes and managed copies are cleaned.
+//   SS6    Ten invariants; see comments on the models that enforce each one.
+//
+// SQLite has no enums and no arrays: string fields are validated in TypeScript
+// (see src/types.ts) and list-shaped values are stored as JSON text.
+
+generator client {
+  provider = "prisma-client-js"
+  // Generated INTO this package rather than into the shared node_modules/.prisma.
+  // Without this, a consumer that also uses Prisma shares one output directory
+  // with us: whichever `prisma generate` ran last wins and the other side's
+  // client loses its models. Reproduced before publishing; not theoretical.
+  output   = "../generated/client"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// People and workspaces
+// ---------------------------------------------------------------------------
+
+/// A human account for the web console. The owner of a workspace (SS2).
+///
+/// There are two doors into one account and neither is the main one. An email
+/// and a password is one; a wallet that signed a Sign-In-With-Ethereum message
+/// is the other. Both columns are therefore nullable: an account opened with a
+/// wallet has no email to store and no password to hash, and SS5 line 151 -
+/// "for memory operations no wallet, gas or token purchase is needed" - means
+/// the reverse must stay true forever, so neither door may become required.
+model User {
+  id           String   @id @default(cuid())
+  email        String?  @unique
+  passwordHash String?
+  displayName  String
+  createdAt    DateTime @default(now())
+
+  /// Where reward payouts are claimed, set by connecting a wallet in the console.
+  /// Nullable forever: the memory system works with no wallet, and invariant 10
+  /// says the core runs without the token at all. Stored lowercase so a
+  /// checksummed and an unchecksummed form of the same address are one account.
+  walletAddress   String?
+  walletLinkedAt  DateTime?
+  /// Set only when this address produced a signature the server checked.
+  ///
+  /// walletLinkedAt records that somebody typed an address into the console,
+  /// which proves nothing - PUT /auth/wallet says so in as many words. This
+  /// column is the difference between a mailing address and a key somebody
+  /// holds, and it is the only one a surface may read to claim the wallet is
+  /// the account's. Signing a message is not signing a transaction (line 19):
+  /// nothing moves and no gas is spent.
+  walletProvenAt  DateTime?
+
+  /// The address a signature proved, and the one place an account is reached by
+  /// its key. Unique across the install: an address opens exactly one account.
+  ///
+  /// It is a second column rather than an index on walletAddress, because the
+  /// two are not the same kind of fact. A payout address is typed, and a unique
+  /// index on a typed field would refuse the second person to honestly name a
+  /// shared address - which rewards deliberately supports, merging them into one
+  /// payee under one cap (packages/rewards/src/config.ts) - and would answer
+  /// "already taken" to anyone who typed a stranger's address, turning
+  /// PUT /auth/wallet into an oracle for which wallets hold an account here.
+  /// This column is only ever written by a request that carried a signature, so
+  /// a collision cannot be provoked by typing, only by holding the key.
+  ///
+  /// Never cleared by anything typed. It is how the account is reached, and an
+  /// account that has repointed or forgotten its payout address must still open
+  /// to the key that made it — a wallet-only account has no other way in.
+  /// walletProvenAt records when that key last proved itself. Whether the
+  /// CURRENT payout address counts as proven is decided when it is read, by
+  /// comparing it with this column — so pointing the payout elsewhere and back
+  /// needs no new signature, and typing never touches either column. A row
+  /// proved before this column existed carries the timestamp without the
+  /// address; the next signature from that wallet fills it in.
+  walletProvenAddress String? @unique
+
+  workspaces  Workspace[]
+  resolutions Conflict[]  @relation("ConflictResolvedByUser")
+
+  @@map("users")
+}
+
+/// A Sign-In-With-Ethereum nonce that has been used, and therefore cannot be
+/// used again.
+///
+/// The nonce itself travels between the two halves of a wallet sign-in inside a
+/// cookie this server signed. That cookie proves the nonce is ours and has not
+/// aged out; it cannot prove the nonce is unused, because clearing a cookie is
+/// an instruction to a browser and anything replaying a captured request simply
+/// sends the same value back. This table is the spend, and its unique index is
+/// what settles two replays arriving at once - the same trick invariant 4 uses
+/// for concurrent corrections.
+model SpentSiweNonce {
+  id String @id @default(cuid())
+
+  /// sha256 of the nonce, never the nonce. Only exact matches are ever looked
+  /// up, so the hash does the whole job, and a spent nonce is a secret this
+  /// store then does not hold (SS7.1).
+  nonceHash String @unique
+
+  /// When the cookie carrying this nonce stops verifying. Past that moment no
+  /// replay can present it, so the row has nothing left to prevent and is swept.
+  expiresAt DateTime
+  spentAt   DateTime @default(now())
+
+  @@index([expiresAt])
+  @@map("spent_siwe_nonces")
+}
+
+/// One project's memory. A shared scope for selected agents - never a common
+/// database for all users (SS2).
+model Workspace {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String   @default("")
+  ownerId     String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  /// Context budget in characters for recall (SS3.4, OPEN-3 default).
+  contextLimit Int @default(6000)
+
+  // ---- Optional module of SS9: model summaries -------------------------
+  /// OFF unless an owner turns it on. SS9: "not required for basic merging and
+  /// not included by default"; SS4.2: text reaches an external model "only with
+  /// explicit owner permission". This column is that permission.
+  modelSummariesEnabled Boolean @default(false)
+  /// Who granted it and when - the audit trail SS4.2 implies.
+  modelSummariesEnabledAt DateTime?
+  modelSummariesEnabledBy String?
+  /// Provider slug, e.g. "openrouter". OPEN-4 leaves the choice open.
+  modelProvider String @default("openrouter")
+  /// Model id passed to the provider verbatim.
+  modelName String @default("anthropic/claude-haiku-4.5")
+
+  // ---- Usage verification for rewards ----------------------------------
+  /// An OpenRouter key belonging to the workspace owner, encrypted at rest.
+  ///
+  /// Rewards are paid for AI spend that a PROVIDER confirms, never for spend an
+  /// agent claims. Confirming a generation means asking OpenRouter about it,
+  /// and OpenRouter will only answer to the key that paid for it - so the key
+  /// has to be here. It is used for exactly one read-only question and is never
+  /// returned by any endpoint.
+  usageProvider    String  @default("openrouter")
+  usageKeyCipher   String?
+  usageKeyHint     String  @default("")
+  usageLinkedAt    DateTime?
+
+  owner       User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  agents      Agent[]
+  records     MemoryRecord[]
+  links       RecordLink[]
+  blocks      MergedBlock[]
+  conflicts   Conflict[]
+  idempotency IdempotencyEntry[]
+  searchDocs  SearchDoc[]
+  audit       AuditEvent[]
+  recallCache RecallCacheEntry[]
+  deletions   DeletionLedgerEntry[]
+  credits     RewardCredit[]
+  modelUsage  ModelUsage[]
+
+  @@index([ownerId])
+  @@map("workspaces")
+}
+
+/// A connected principal. Identity comes from a verified connection (the API
+/// key), never from a free-form string in a model request (SS3.2, SS7 spoofing
+/// risk). When a client cannot distinguish its subagents, it uses one key and
+/// the server correctly treats them as one principal (SS4.2).
+model Agent {
+  id          String  @id @default(cuid())
+  workspaceId String
+  name        String
+  /// "lead" | "subagent"
+  kind        String  @default("subagent")
+  description String  @default("")
+
+  /// Only the hash is stored; the plaintext key is shown once at creation.
+  keyHash   String  @unique
+  /// Display-only prefix, e.g. "offcut_sk_a1b2...". Never enough to authenticate.
+  keyPrefix String
+
+  // Granular permissions (SS2: a subagent cannot grant itself new permissions).
+  canRead    Boolean @default(true)
+  canWrite   Boolean @default(true)
+  canImport  Boolean @default(false)
+  canMerge   Boolean @default(true)
+  canResolve Boolean @default(false)
+  canForget  Boolean @default(false)
+  canExport  Boolean @default(false)
+
+  /// Revocation blocks every subsequent operation by this principal
+  /// (SS3.4, invariant 9). Never delete the row: authorship must survive.
+  revokedAt DateTime?
+
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime?
+
+  workspace   Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  records     MemoryRecord[] @relation("RecordAuthor")
+  links       RecordLink[]
+  idempotency IdempotencyEntry[]
+  resolutions Conflict[]     @relation("ConflictResolvedByAgent")
+
+  @@index([workspaceId])
+  @@index([keyHash])
+  @@map("agents")
+}
+
+// ---------------------------------------------------------------------------
+// Source records
+// ---------------------------------------------------------------------------
+
+/// One VERSION of a source record. A correction creates a new row that links
+/// back to its predecessor; the previous row is kept forever (SS3.2, invariant 1).
+///
+/// `recordId` is the stable lineage identifier quoted in references such as
+/// R1/D1/T1 in SS3.6; `version` counts corrections inside that lineage.
+model MemoryRecord {
+  id          String @id @default(cuid())
+  /// Stable lineage id, shared by every version of this record.
+  recordId    String
+  version     Int    @default(1)
+  workspaceId String
+
+  /// Author, derived from the verified connection - not a model-supplied string.
+  agentId String
+
+  /// "fact" | "decision" | "result" | "hypothesis" (SS2).
+  type  String
+  text  String
+  topic String
+  /// Supporting evidence. A separate field from authorship (SS3.2).
+  source String @default("")
+
+  /// For imported records only: the authorship the payload CLAIMS. Stored apart
+  /// from the verified `agentId` so an import can never spoof an author (SS7).
+  claimedAuthor String?
+
+  /// "workspace" | "private". Merging requires an identical audience (SS3.3).
+  scope String @default("workspace")
+
+  // ---- Structured fact, the deterministic half of merging (SS3.3) ----
+  /// An explicitly identified fact, e.g. "storage.location".
+  factKey     String?
+  /// Its value, e.g. "local" / "cloud". Two values of one factKey in one
+  /// factContext is a conflict that code can detect without any model.
+  factValue   String?
+  /// The context the fact holds in, e.g. "release-1". Empty means global.
+  factContext String  @default("")
+
+  /// Hash of (normalised text + topic + type + scope): exact-duplicate detection.
+  contentHash String
+
+  /// True for the newest non-deleted version of this lineage.
+  isCurrent         Boolean @default(true)
+  previousVersionId String?
+
+  createdAt DateTime @default(now())
+
+  // ---- Deletion (SS3.5, invariant 7) ----
+  /// Set on forget(). Excluded from search, counts, recall, merge and export.
+  deletedAt   DateTime?
+  deletedBy   String?
+  /// True once the payload has been wiped. The row survives only as a tombstone
+  /// so lineage and audit stay intact while the content is unrecoverable.
+  purged      Boolean   @default(false)
+
+  workspace    Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  author       Agent               @relation("RecordAuthor", fields: [agentId], references: [id], onDelete: Cascade)
+  linksFrom    RecordLink[]        @relation("LinkFrom")
+  linksTo      RecordLink[]        @relation("LinkTo")
+  blockSources MergedBlockSource[]
+  conflictSides ConflictSide[]
+  searchDoc    SearchDoc?
+
+  @@unique([recordId, version])
+  @@index([workspaceId, isCurrent, deletedAt])
+  @@index([workspaceId, topic])
+  @@index([workspaceId, factKey, factContext])
+  @@index([workspaceId, contentHash])
+  @@index([agentId])
+  @@map("memory_records")
+}
+
+/// An explicit relationship between two record lineages. Explicit links are one
+/// of the three deterministic merge signals (topic, links, structured values);
+/// semantic guessing belongs to the optional module in SS9.
+model RecordLink {
+  id          String @id @default(cuid())
+  workspaceId String
+  /// "updates" | "relates" | "partOf" | "duplicateOf" | "contradicts"
+  kind        String
+
+  fromRecordId String
+  toRecordId   String
+  note         String @default("")
+
+  createdByAgentId String
+  createdAt        DateTime @default(now())
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  from      MemoryRecord @relation("LinkFrom", fields: [fromRecordId], references: [id], onDelete: Cascade)
+  to        MemoryRecord @relation("LinkTo", fields: [toRecordId], references: [id], onDelete: Cascade)
+  createdBy Agent        @relation(fields: [createdByAgentId], references: [id], onDelete: Cascade)
+
+  @@unique([fromRecordId, toRecordId, kind])
+  @@index([workspaceId])
+  @@map("record_links")
+}
+
+// ---------------------------------------------------------------------------
+// Derived memory
+// ---------------------------------------------------------------------------
+
+/// A derived block produced by merge(). It stores the source ids AND versions it
+/// was built from. When any source changes or is deleted the block is marked
+/// stale and must be rebuilt before it can be returned as current
+/// (SS3.3, invariants 6 and 7).
+model MergedBlock {
+  id          String @id @default(cuid())
+  workspaceId String
+  /// The audience this block was built for. A block never spans audiences
+  /// (invariant 2: merging must not broaden access).
+  scope       String @default("workspace")
+  /// Private blocks belong to exactly one agent.
+  ownerAgentId String?
+
+  topic   String
+  title   String
+  /// JSON: { items: [{ text, recordId, version, agentIds[] }], conflicts: [...] }
+  body    String
+
+  /// "deterministic" | "model".
+  ///
+  /// SS9 requires a model's output to be "labeled as derived". Deterministic
+  /// blocks come from the code in merge.ts; model blocks come from the optional
+  /// module and are never allowed to replace one. Callers can always tell which
+  /// they are reading.
+  origin  String @default("deterministic")
+  /// For model blocks: the model that produced it, recorded for accountability.
+  modelName String?
+  /// The model's prose. Null on deterministic blocks, and null on a model block
+  /// whose summary failed structural validation - SS9: on failure OFFCUT returns
+  /// the linked records WITHOUT a summary.
+  summary String?
+
+  createdAt DateTime  @default(now())
+  rebuiltAt DateTime?
+  /// Non-null means the block is stale and cannot be served as current.
+  staleAt   DateTime?
+  staleReason String?
+
+  workspace Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sources   MergedBlockSource[]
+
+  @@index([workspaceId, topic])
+  @@index([workspaceId, staleAt])
+  @@map("merged_blocks")
+}
+
+/// Pins a derived block to an exact source version (invariant 6).
+model MergedBlockSource {
+  id       String @id @default(cuid())
+  blockId  String
+  /// Row id of the exact MemoryRecord version used.
+  recordRowId String
+  /// Lineage id + version, kept denormalised so staleness checks are cheap.
+  recordId String
+  version  Int
+
+  block  MergedBlock  @relation(fields: [blockId], references: [id], onDelete: Cascade)
+  record MemoryRecord @relation(fields: [recordRowId], references: [id], onDelete: Cascade)
+
+  @@unique([blockId, recordRowId])
+  @@index([recordId])
+  @@map("merged_block_sources")
+}
+
+// ---------------------------------------------------------------------------
+// Conflicts
+// ---------------------------------------------------------------------------
+
+/// Two different values of one explicitly identified fact in the same context
+/// and audience. A detected conflict cannot disappear from retrieval without a
+/// recorded resolution or deletion of the data (invariant 5).
+model Conflict {
+  id          String @id @default(cuid())
+  workspaceId String
+  scope       String @default("workspace")
+
+  factKey     String
+  factContext String @default("")
+
+  /// "open" | "resolved"
+  status     String   @default("open")
+  detectedAt DateTime @default(now())
+
+  // ---- Resolution (SS3.5): chosen version, rationale and decision author ----
+  resolvedRecordId  String?
+  resolvedVersion   Int?
+  rationale         String?
+  resolvedByUserId  String?
+  resolvedByAgentId String?
+  resolvedAt        DateTime?
+
+  workspace       Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sides           ConflictSide[]
+  resolvedByUser  User?          @relation("ConflictResolvedByUser", fields: [resolvedByUserId], references: [id])
+  resolvedByAgent Agent?         @relation("ConflictResolvedByAgent", fields: [resolvedByAgentId], references: [id])
+
+  @@unique([workspaceId, scope, factKey, factContext])
+  @@index([workspaceId, status])
+  @@map("conflicts")
+}
+
+/// One competing value inside a conflict. Every side keeps its own record
+/// reference so neither version is ever overwritten (SS7.1).
+model ConflictSide {
+  id         String @id @default(cuid())
+  conflictId String
+
+  recordRowId String
+  recordId    String
+  version     Int
+  value       String
+  agentId     String
+
+  /// Set when this side is removed because its record was deleted (SS3.5).
+  retiredAt DateTime?
+
+  conflict Conflict     @relation(fields: [conflictId], references: [id], onDelete: Cascade)
+  record   MemoryRecord @relation(fields: [recordRowId], references: [id], onDelete: Cascade)
+
+  @@unique([conflictId, recordRowId])
+  @@index([recordId])
+  @@map("conflict_sides")
+}
+
+// ---------------------------------------------------------------------------
+// Write safety, search and audit
+// ---------------------------------------------------------------------------
+
+/// Idempotency for every write (SS3.2, invariant 3). Replaying one request
+/// returns the previous result; the same key with different content is rejected.
+model IdempotencyEntry {
+  id          String @id @default(cuid())
+  workspaceId String
+  agentId     String
+  key         String
+
+  /// Hash of the canonical request payload; a mismatch means key reuse.
+  requestHash String
+  /// The stored response, replayed verbatim on retry.
+  resultJson  String
+  operation   String
+
+  createdAt DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agent     Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, key])
+  @@index([workspaceId, agentId])
+  @@map("idempotency_entries")
+}
+
+/// The search index of SS4. Kept as explicit rows rather than a derived view so
+/// that deletion can provably purge it (SS3.5: "indexes are cleaned up").
+model SearchDoc {
+  id          String @id @default(cuid())
+  workspaceId String
+  recordRowId String @unique
+  recordId    String
+  version     Int
+
+  /// Audience and author are duplicated here so the access filter runs inside
+  /// the search query itself - deleted or unauthorised rows never reach scoring.
+  scope   String
+  agentId String
+
+  /// Normalised whitespace-joined tokens of text + topic + factKey/factValue.
+  tokens String
+  /// Token count, used for length normalisation while ranking.
+  length Int
+
+  record    MemoryRecord @relation(fields: [recordRowId], references: [id], onDelete: Cascade)
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, scope])
+  @@map("search_docs")
+}
+
+/// Cached recall results. The cache stores record ids only - permissions are
+/// re-checked on every hit, so revocation takes effect immediately (SS3.4).
+model RecallCacheEntry {
+  id          String @id @default(cuid())
+  workspaceId String
+  queryHash   String
+
+  /// JSON array of record row ids.
+  recordRowIds String
+  createdAt    DateTime  @default(now())
+  /// Set whenever a write, merge or deletion touches this workspace.
+  invalidatedAt DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, queryHash])
+  @@index([workspaceId, invalidatedAt])
+  @@map("recall_cache_entries")
+}
+
+/// Append-only record of every deletion (SS3.5, OPEN-5).
+///
+/// This is what makes restoring a backup safe. A snapshot taken BEFORE a record
+/// was deleted still contains that record; restoring it naively would resurrect
+/// content the user asked to be destroyed, which invariant 7 forbids. So every
+/// forget() appends here, the ledger is mirrored to a file OUTSIDE the snapshot
+/// rotation, and restore replays every deletion recorded after the snapshot was
+/// taken.
+///
+/// The entry deliberately stores NO content - only the identity of what was
+/// removed. A ledger that remembered the text would defeat its own purpose.
+model DeletionLedgerEntry {
+  id          String @id @default(cuid())
+  workspaceId String
+  /// Lineage id of the deleted record.
+  recordId    String
+  /// Row ids of the exact versions removed, JSON array.
+  rowIds      String
+  /// True when the payload was wiped rather than only hidden.
+  purged      Boolean  @default(true)
+  /// Who performed it: an agent id, or "owner".
+  deletedBy   String
+  reason      String   @default("")
+  deletedAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, deletedAt])
+  @@index([recordId])
+  @@map("deletion_ledger")
+}
+
+/// Append-only trail. Supports SS3.5, which requires a recorded decision author.
+model AuditEvent {
+  id          String @id @default(cuid())
+  workspaceId String
+
+  /// "user" | "agent" | "system"
+  actorType String
+  actorId   String
+  actorName String @default("")
+
+  /// e.g. "memory.add", "memory.forget", "agent.revoke"
+  action   String
+  targetId String @default("")
+  /// JSON detail payload.
+  detail   String @default("{}")
+
+  createdAt DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@map("audit_events")
+}
+
+// ---------------------------------------------------------------------------
+// Rewards
+// ---------------------------------------------------------------------------
+
+/// A record that someone ELSE actually used.
+///
+/// This is the only thing rewards are paid for, and the shape of the table is
+/// the anti-farm design rather than a note about it:
+///
+///   @@unique on recordId  A record earns ONCE, ever. Retrieving the same
+///                         record a thousand times pays for one. The ceiling on
+///                         what a workspace can earn is therefore the number of
+///                         genuinely distinct pieces of memory it produced that
+///                         another agent went on to use - a number that cannot
+///                         be inflated by repetition, only by doing the work.
+///
+/// Writing a record earns nothing. Reading your own earns nothing. Agents are
+/// free to create, so paying per agent or per record would pay whoever scripts
+/// fastest; paying for retrieval by a different agent at least requires the two
+/// halves of the product to have happened.
+///
+/// Honest about what this does NOT solve: one person running two agents can
+/// still write with one and read with the other. That is bounded by the
+/// per-period pool and the per-workspace cap in @offcut/rewards, and by the
+/// fact that the accrual rules live off-chain and can change the moment a farm
+/// appears.
+model RewardCredit {
+  id          String @id @default(cuid())
+  workspaceId String
+
+  /// The record that was used. Unique: earned once, ever.
+  recordId String @unique
+  /// Who wrote it - the side that earns.
+  authorAgentId String
+  /// Who retrieved it. Never equal to authorAgentId.
+  usedByAgentId String
+
+  points Int @default(1)
+
+  createdAt DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([createdAt])
+  @@map("reward_credits")
+}
+
+/// What one address is owed for one distribution period.
+///
+/// Published roots are CUMULATIVE — every leaf carries the total an address has
+/// ever earned, so a recipient can ignore a hundred roots and claim once. That
+/// total cannot be recomputed from reward_credits, because it depends on the
+/// pool, the rate and the cap that were in force in each past period and those
+/// are allowed to change. So every period's decision is written down here once
+/// and the cumulative figure is the sum of these rows. This table, not the
+/// credit table, is what the distributor's arithmetic rests on.
+///
+/// `amount` is a decimal string of BASE token units, deliberately not a number.
+/// An 18-decimal token puts one whole token at 10^18, and SQLite's INTEGER —
+/// which is what Prisma's BigInt becomes — runs out at about 9.2 whole tokens.
+/// A REAL would quietly lose the low digits of any realistic balance. Text is
+/// the only column shape that survives the round trip exactly; every read parses
+/// it straight back to a bigint.
+model RewardAccrual {
+  id String @id @default(cuid())
+
+  /// Lowercase 0x address of the workspace owner, matching User.walletAddress.
+  /// Payout follows ownership: agents hold keys, not wallets.
+  address String
+
+  /// Inclusive.
+  periodStart DateTime
+  /// Exclusive, matching the credit window it was computed from.
+  periodEnd   DateTime
+
+  /// What this period decided, in token base units. The SUM of the two columns
+  /// below, and the only figure a published root is built from.
+  amount String
+
+  /// The same amount, split by what earned it: confirmed AI spend, and memory
+  /// another agent used. Two layers pay into one row - see accrual.ts in
+  /// @offcut/rewards - and a reader told only the total cannot tell why they
+  /// were paid, which for somebody who earns from memory alone is the whole
+  /// answer. Defaulted to "0" so rows written before the memory layer existed
+  /// read as what they were: spend, and nothing else. Text for the reason
+  /// amount is text - an 18-decimal amount does not fit the integer SQLite
+  /// would sum with.
+  spendAmount  String @default("0")
+  memoryAmount String @default("0")
+
+  createdAt DateTime @default(now())
+
+  /// One row per address per period: re-running a period writes nothing new.
+  ///
+  /// periodEnd is deliberately NOT part of this key. Two windows that share a
+  /// start and differ in length overlap, and overlapping windows pay for the
+  /// same credits twice; sharing a start, they collide here instead of both
+  /// being accepted. Overlaps that do not share a start are refused in code —
+  /// see recordAccruals in @offcut/rewards.
+  @@unique([address, periodStart])
+  @@index([address])
+  @@index([periodStart])
+  @@map("reward_accruals")
+}
+
+/// One model request, as the provider reports it.
+///
+/// The brief fixes the metric: reward weight follows CONFIRMED AI spend by an
+/// account's subagents, not records written and not agents created. Two details
+/// in this table are the whole design:
+///
+///   @@unique on (provider, generationId)
+///       "one request cannot be counted twice". The provider's own id for a
+///       request is the key, so replaying a report - by accident or on purpose
+///       - writes nothing.
+///
+///   reportedCostMicros vs verifiedCostMicros
+///       What the agent said, and what the provider said. Only the second one
+///       ever pays. Keeping both means a divergence is visible rather than
+///       silently resolved in someone's favour.
+///
+/// Payment follows COST, not token count. "Spend" is the word in the brief, and
+/// it is also the only reading that defends the pool: token counts differ by
+/// three orders of magnitude between models, so paying per token would pay
+/// whoever picked the cheapest model, while paying per dollar spent means
+/// farming costs the farmer real money for every unit of reward.
+///
+/// Money is in integer millionths of a dollar. Floats do not belong anywhere
+/// near an amount that decides a payout.
+model ModelUsage {
+  id          String @id @default(cuid())
+  workspaceId String
+
+  /// The integration that can confirm this. Only providers we can actually ask.
+  provider String @default("openrouter")
+  /// The provider's id for one request.
+  generationId String
+
+  /// Which agent reported it, so a farm is attributable.
+  reportedByAgentId String
+  /// The model the agent says it used. Informational; the provider is the truth.
+  model String @default("")
+
+  reportedTokens     Int @default(0)
+  reportedCostMicros Int @default(0)
+
+  /// "pending" until the provider answers, then "verified" or "rejected".
+  status         String  @default("pending")
+  rejectedReason String  @default("")
+
+  verifiedTokens     Int @default(0)
+  verifiedCostMicros Int @default(0)
+
+  reportedAt DateTime  @default(now())
+  /// When the provider confirmed it. This timestamp, not reportedAt, decides
+  /// which reward period a request belongs to: a report that took an hour to
+  /// verify must not land in a period that has already been paid.
+  verifiedAt DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, generationId])
+  @@index([workspaceId, verifiedAt])
+  @@index([status, reportedAt])
+  @@map("model_usage")
+}

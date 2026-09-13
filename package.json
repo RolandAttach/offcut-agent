@@ -1,0 +1,46 @@
+{
+  "name": "offcut-agent",
+  "version": "3.1.0",
+  "private": true,
+  "description": "Shared memory for AI subagents: a memory core, an MCP server, an HTTP API, and an on-chain reward ledger.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "setup": "pnpm install && pnpm --filter @offcut/core db:push && pnpm --filter @offcut/core seed",
+    "dev": "pnpm --filter @offcut/api dev",
+    "mcp": "pnpm --filter @offcut/mcp-server start",
+    "mcp:config": "node scripts/mcp-config.mjs",
+    "mcp:install": "node scripts/mcp-config.mjs --install",
+    "mcp:check": "node scripts/check-mcp.mjs",
+    "db:push": "pnpm --filter @offcut/core db:push",
+    "seed": "pnpm --filter @offcut/core seed",
+    "seed:reset": "pnpm --filter @offcut/core seed:reset",
+    "test": "pnpm --filter @offcut/core test && pnpm --filter @offcut/rewards test && pnpm --filter @offcut/publisher test && pnpm --filter @offcut/acceptance test && pnpm --filter @offcut/api test && pnpm --filter @offcut/contracts test",
+    "test:invariants": "pnpm --filter @offcut/core test",
+    "test:acceptance": "pnpm --filter @offcut/acceptance test",
+    "test:rewards": "pnpm --filter @offcut/rewards test",
+    "test:publisher": "pnpm --filter @offcut/publisher test",
+    "test:api": "pnpm --filter @offcut/api test",
+    "test:contracts": "pnpm --filter @offcut/contracts test",
+    "build": "pnpm --filter @offcut/core build && pnpm --filter @offcut/rewards build && pnpm --filter @offcut/sdk build && pnpm --filter @offcut/mcp-server build && pnpm --filter @offcut/api build && pnpm --filter @offcut/publisher build",
+    "start": "pnpm --filter @offcut/api start",
+    "publisher": "pnpm --filter @offcut/publisher start",
+    "contracts:build": "pnpm --filter @offcut/contracts build",
+    "use:sqlite": "node scripts/set-datasource.mjs sqlite",
+    "use:postgres": "node scripts/set-datasource.mjs postgresql",
+    "backup": "pnpm --filter @offcut/core backup",
+    "backup:list": "pnpm --filter @offcut/core backup:list",
+    "backup:prune": "pnpm --filter @offcut/core backup:prune",
+    "backup:restore": "pnpm --filter @offcut/core backup:restore",
+    "publish:check": "node scripts/publish-check.mjs",
+    "publish:dry": "pnpm --filter @offcut/core --filter @offcut/sdk --filter @offcut/mcp-server publish --dry-run --no-git-checks",
+    "publish:packages": "pnpm build && pnpm --filter @offcut/core --filter @offcut/sdk --filter @offcut/mcp-server publish --access public --no-git-checks"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

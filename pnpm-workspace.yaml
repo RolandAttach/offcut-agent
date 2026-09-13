@@ -1,0 +1,22 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+
+# pnpm 11 blocks package build scripts unless they are named here.
+# Prisma downloads its query engine, esbuild its binary; the Nest postinstall
+# only prints a message but must still be declared.
+allowBuilds:
+  '@nestjs/core': true
+  '@prisma/client': true
+  '@prisma/engines': true
+  # Reads the consumer's package.json and warns if the @reown/appkit* packages
+  # are on mismatched versions. Useful to its authors, nothing to us, and one
+  # fewer third-party script executing on every install.
+  '@reown/appkit': false
+  esbuild: true
+  # Native bindings for Ethereum crypto: keccak hashing and secp256k1
+  # signatures. Both ship a pure-JS fallback, but the compiled path is what the
+  # contract tooling actually uses.
+  keccak: true
+  prisma: true
+  secp256k1: true
