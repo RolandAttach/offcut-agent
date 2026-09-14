@@ -1,0 +1,43 @@
+{
+  "name": "@offcut/sdk",
+  "version": "3.1.0",
+  "description": "OFFCUT AGENT memory SDK - the TypeScript interface for memory operations (TZ SS4.1).",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@offcut/core": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "memory",
+    "agents",
+    "mcp",
+    "subagents",
+    "sdk",
+    "offcut"
+  ],
+  "engines": {
+    "node": ">=20.11.0"
+  }
+}
