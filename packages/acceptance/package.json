@@ -1,0 +1,22 @@
+{
+  "name": "@offcut/acceptance",
+  "version": "3.1.0",
+  "private": true,
+  "description": "The acceptance suite of TZ SS7.1, run as a real integration across core, SDK and MCP.",
+  "license": "MIT",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@offcut/core": "workspace:*",
+    "@offcut/mcp-server": "workspace:*",
+    "@offcut/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}
