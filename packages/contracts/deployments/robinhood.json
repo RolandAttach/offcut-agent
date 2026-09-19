@@ -1,0 +1,18 @@
+{
+  "network": "robinhood",
+  "chainId": 4663,
+  "proxy": "0x92c9ef7FD1c2e7423f9b5edDf15ef74eaC4e04Ea",
+  "implementation": "0x143978f9Cc8d1337CdF6209060A9c2CEdaa7c5d6",
+  "owner": "0xBCd04B8de5e4e1C5E0ed42002be9B92e6CdBd519",
+  "publisher": "0x052ee639D0D67e83EdCeb4BD8FE2CB0d1d28422d",
+  "token": null,
+  "deployer": "0xBCd04B8de5e4e1C5E0ed42002be9B92e6CdBd519",
+  "txHash": "0x21ed02e76f6d6a5c4e70038a83dbc74719dcf338347dae9af6783a740abfac46",
+  "blockNumber": 68203850,
+  "deployedAt": "2026-09-20T19:52:27.296Z",
+  "explorer": {
+    "proxy": "https://robinhoodchain.blockscout.com/address/0x92c9ef7FD1c2e7423f9b5edDf15ef74eaC4e04Ea",
+    "implementation": "https://robinhoodchain.blockscout.com/address/0x143978f9Cc8d1337CdF6209060A9c2CEdaa7c5d6",
+    "deployTx": "https://robinhoodchain.blockscout.com/tx/0x21ed02e76f6d6a5c4e70038a83dbc74719dcf338347dae9af6783a740abfac46"
+  }
+}

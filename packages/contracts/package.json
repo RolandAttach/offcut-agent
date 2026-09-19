@@ -1,0 +1,35 @@
+{
+  "name": "@offcut/contracts",
+  "version": "3.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "OFFCUT AGENT reward contracts for Robinhood Chain (4663).",
+  "scripts": {
+    "build": "hardhat compile",
+    "test": "hardhat test",
+    "node": "hardhat node",
+    "typecheck": "tsc --noEmit",
+    "keys": "node scripts/generate-keys.js",
+    "deploy:local": "hardhat run scripts/deploy.ts --network hardhat",
+    "deploy:testnet": "hardhat run scripts/deploy.ts --network robinhoodTestnet",
+    "deploy:mainnet": "hardhat run scripts/deploy.ts --network robinhood",
+    "set-token:testnet": "hardhat run scripts/set-token.ts --network robinhoodTestnet",
+    "set-token:mainnet": "hardhat run scripts/set-token.ts --network robinhood",
+    "status:local": "hardhat run scripts/status.ts --network hardhat",
+    "status:testnet": "hardhat run scripts/status.ts --network robinhoodTestnet",
+    "status:mainnet": "hardhat run scripts/status.ts --network robinhood"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.1.0",
+    "@openzeppelin/contracts-upgradeable": "^5.1.0",
+    "@openzeppelin/hardhat-upgrades": "^3.9.0",
+    "@types/chai": "^4.3.20",
+    "chai": "^4.5.0",
+    "hardhat": "^2.22.17",
+    "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0"
+  }
+}
